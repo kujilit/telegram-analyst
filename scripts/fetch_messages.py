@@ -1,43 +1,71 @@
-"""
-Сбор сообщений
-"""
-
 import os
 import pandas as pd
+from datetime import datetime, timezone
 from telethon import TelegramClient
 from dotenv import load_dotenv
+import asyncio
 
 load_dotenv()
 
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
-CHANNEL = os.getenv("CHANNEL")
-OUTPUT_PATH = "data/messages.csv"
+CHANNEL = "your_channel_name"
 
-if not API_ID or not API_HASH:
-    raise ValueError("❌ Не заданы API_ID или API_HASH в файле .env")
+CLIENT = TelegramClient("session", API_ID, API_HASH)
+
+DATE_FROM = datetime(2025, 1, 1, tzinfo=timezone.utc)
+DATE_TO = datetime(2025, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
 
 
-client = TelegramClient('session', API_ID, API_HASH)
+async def collect_channel_messages(
+    client: TelegramClient,
+    channel: str,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> pd.DataFrame:
 
-async def fetch_messages():
-    print(f"Подключаемся к каналу: {CHANNEL}")
-    messages_data = []
+    rows = []
 
-    async for message in client.iter_messages(CHANNEL):
-        if message.text:
-            messages_data.append({
-                "id": message.id,
-                "date": message.date,
-                "text": message.text
-            })
+    async for message in client.iter_messages(channel, offset_date=date_to):
+        if not message.date:
+            continue
 
-    df = pd.DataFrame(messages_data)
-    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
-    df.to_csv(OUTPUT_PATH, index=False)
-    print(f"Сохранено {len(df)} сообщений в {OUTPUT_PATH}")
+        if date_from and message.date < date_from:
+            break
+
+        text = message.text or ""
+
+        rows.append({
+            "id": message.id,
+            "date": message.date,
+            "text": text,
+            "views": message.views,
+            "forwards": message.forwards,
+            "replies": message.replies.replies if message.replies else 0,
+            "reactions": sum(r.count for r in message.reactions.results)
+                if message.reactions else 0,
+            "has_media": message.media is not None,
+            "text_length": len(text),
+            "word_count": len(text.split()),
+            "hour": message.date.hour,
+            "weekday": message.date.weekday(),
+        })
+
+    return pd.DataFrame(rows)
+
+
+async def main():
+    client = TelegramClient("session", API_ID, API_HASH)
+
+    async with client:
+        return await collect_channel_messages(
+            client=client,
+            channel=CHANNEL,
+            date_from=DATE_FROM,
+            date_to=DATE_TO,
+        )
 
 
 if __name__ == "__main__":
-    with client:
-        client.loop.run_until_complete(fetch_messages())
+    df = asyncio.run(main())
+    print(df)
