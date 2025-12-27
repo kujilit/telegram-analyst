@@ -9,7 +9,6 @@ load_dotenv()
 
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
-CHANNEL = "your_channel_name"
 
 CLIENT = TelegramClient("session", API_ID, API_HASH)
 
@@ -54,18 +53,19 @@ async def collect_channel_messages(
     return pd.DataFrame(rows)
 
 
-async def main():
+async def main(cahnnel_name: str):
     client = TelegramClient("session", API_ID, API_HASH)
 
     async with client:
         return await collect_channel_messages(
             client=client,
-            channel=CHANNEL,
+            channel=cahnnel_name,
             date_from=DATE_FROM,
             date_to=DATE_TO,
         )
 
 
 if __name__ == "__main__":
-    df = asyncio.run(main())
+    channel = "your_channel_name"
+    df = asyncio.run(main(channel))
     print(df)
