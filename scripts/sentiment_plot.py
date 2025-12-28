@@ -1,67 +1,130 @@
-"""
-Анализ тональности
-"""
-
-import pandas as pd
 import re
+import pandas as pd
 from transformers import pipeline
 from tqdm import tqdm
-import os
-
 
 MODEL_NAME = "blanchefort/rubert-base-cased-sentiment"
-INPUT_PATH = "data/messages.csv"
-OUTPUT_PATH = "data/analysis_results.csv"
-BATCH_SIZE = 16 
+BATCH_SIZE = 16
+
+POSITIVE_EMOJI = "😂😄😅😊😍😁🙂"
+NEGATIVE_EMOJI = "😡😠😢😭🤮😤😞"
+
+
+def extract_text_features(text: str) -> dict:
+    text = str(text)
+
+    exclamations = text.count("!")
+    questions = text.count("?")
+
+    caps_letters = sum(1 for c in text if c.isupper())
+    letters = sum(1 for c in text if c.isalpha())
+    caps_ratio = caps_letters / letters if letters else 0
+
+    repeated_letters = len(re.findall(r"(.)\1{2,}", text))
+
+    emoji_positive = sum(c in POSITIVE_EMOJI for c in text)
+    emoji_negative = sum(c in NEGATIVE_EMOJI for c in text)
+
+    return {
+        "exclamations": exclamations,
+        "questions": questions,
+        "caps_ratio": caps_ratio,
+        "repeated_letters": repeated_letters,
+        "emoji_positive": emoji_positive,
+        "emoji_negative": emoji_negative,
+    }
 
 
 def clean_text(text: str) -> str:
-    """Удаляет ссылки, хэштеги, упоминания, эмодзи и спецсимволы."""
     text = str(text).lower()
     text = re.sub(r"http\S+|www\S+", "", text)
     text = re.sub(r"[@#]\w+", "", text)
-    text = re.sub(r"[^а-яёa-z\s]", " ", text)
+    text = re.sub(r"[^а-яёa-z!? ]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
-def analyze_sentiment():
-    if not os.path.exists(INPUT_PATH):
-        raise FileNotFoundError(f"Файл {INPUT_PATH} не найден!")
+def heuristic_sentiment_score(features: dict) -> float:
+    score = 0.0
 
-    print(f"Загружаем данные из {INPUT_PATH}...")
-    df = pd.read_csv(INPUT_PATH)
-    df = df.dropna(subset=["text"])
-    df["clean_text"] = df["text"].apply(clean_text)
+    score += features["emoji_positive"] * 0.3
+    score -= features["emoji_negative"] * 0.4
 
-    print(f"Загружаем модель {MODEL_NAME}...")
-    sentiment_model = pipeline("sentiment-analysis", model=MODEL_NAME)
+    score += min(features["exclamations"], 5) * 0.05
+    score += features["caps_ratio"] * 0.5
+    score += features["repeated_letters"] * 0.1
 
-    print("Анализ тональности...")
-    tqdm.pandas()
+    return max(min(score, 1.0), -1.0)
+
+
+def analyze_sentiment(
+    df: pd.DataFrame,
+    *,
+    text_column: str = "text",
+    batch_size: int = BATCH_SIZE,
+    model_name: str = MODEL_NAME,
+) -> pd.DataFrame:
+
+    if text_column not in df.columns:
+        raise ValueError(f"В DataFrame нет колонки '{text_column}'")
+
+    work_df = df.copy()
+    work_df = work_df.dropna(subset=[text_column])
+
+    # Извлечение фич
+    features = work_df[text_column].apply(extract_text_features)
+    features_df = pd.DataFrame(features.tolist())
+    work_df = pd.concat([work_df.reset_index(drop=True), features_df], axis=1)
+
+    work_df["clean_text"] = work_df[text_column].apply(clean_text)
+
+    sentiment_model = pipeline(
+        "sentiment-analysis",
+        model=model_name
+    )
+
+    texts = (
+        work_df["clean_text"]
+        .astype(str)
+        .str.slice(0, 512)
+        .tolist()
+    )
 
     results = []
-    for i in tqdm(range(0, len(df), BATCH_SIZE)):
-        batch = df["clean_text"].iloc[i:i+BATCH_SIZE].astype(str).str.slice(0, 512).tolist()
+
+    tqdm.pandas(desc="Sentiment analysis")
+
+    for i in tqdm(range(0, len(texts), batch_size)):
+        batch = texts[i:i + batch_size]
         try:
             preds = sentiment_model(batch)
-        except Exception as e:
-            print(f"Ошибка при обработке батча {i}: {e}")
+        except Exception:
             preds = [{"label": "ERROR", "score": 0.0}] * len(batch)
         results.extend(preds)
 
-    df["sentiment"] = [r["label"] for r in results]
-    df["confidence"] = [r["score"] for r in results]
+    work_df["sentiment"] = [r["label"] for r in results]
+    work_df["confidence"] = [r["score"] for r in results]
 
-    sentiment_map = {"POSITIVE": 1, "NEUTRAL": 0, "NEGATIVE": -1, "ERROR": None}
-    df["sentiment_value"] = df["sentiment"].map(sentiment_map)
+    sentiment_map = {
+        "POSITIVE": 1,
+        "NEUTRAL": 0,
+        "NEGATIVE": -1,
+        "ERROR": 0,
+    }
 
-    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
-    df.to_csv(OUTPUT_PATH, index=False)
+    work_df["model_score"] = (
+        work_df["sentiment"].map(sentiment_map)
+        * work_df["confidence"]
+    )
 
-    print(f"Анализ завершён! Результаты сохранены в {OUTPUT_PATH}.")
-    print(df[["text", "sentiment", "confidence"]].head())
+    work_df["heuristic_score"] = work_df.apply(
+        lambda row: heuristic_sentiment_score(row.to_dict()),
+        axis=1
+    )
 
+    work_df["final_sentiment_score"] = (
+        work_df["model_score"] * 0.7
+        + work_df["heuristic_score"] * 0.3
+    )
 
-if __name__ == "__main__":
-    analyze_sentiment()
+    return work_df

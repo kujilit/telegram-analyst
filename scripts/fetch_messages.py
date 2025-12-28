@@ -19,8 +19,8 @@ DATE_TO = datetime(2025, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
 async def collect_channel_messages(
     client: TelegramClient,
     channel: str,
-    date_from: datetime | None = None,
-    date_to: datetime | None = None,
+    date_from: datetime,
+    date_to: datetime,
 ) -> pd.DataFrame:
 
     rows = []
